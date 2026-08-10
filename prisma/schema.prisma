@@ -1,0 +1,358 @@
+// =============================================================================
+// EHR-RCM — Unified Prisma schema  (Task T01)
+//
+// Domain-configurable EHR + Revenue Cycle Management data model.
+// Supports HEALTHCARE / SALON / GENERIC modes from a single schema:
+//   - "Customer" is the domain-neutral person record (patient | client).
+//   - Clinical tables (Encounter*, Claim) are only exercised in HEALTHCARE mode.
+//   - pgvector powers clinical-guideline RAG (see ClinicalGuideline.embedding).
+//
+// Sensitive PII fields (ssn, phone, address) are stored as ciphertext and are
+// transparently AES-256-GCM encrypted/decrypted by the extended Prisma client
+// (src/shared/db/prisma.ts, Task T04).
+//
+// Acceptance (matrix T01): `npx prisma validate` passes.
+// =============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector")]
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  ADMIN
+  PROVIDER
+  CLINICIAN
+  FRONT_DESK
+  BILLER
+  PATIENT
+}
+
+enum ResourceType {
+  PROVIDER
+  ROOM
+  EQUIPMENT
+  CHAIR
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  CHECKED_IN
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum EncounterStatus {
+  OPEN
+  SIGNED
+  AMENDED
+  CLOSED
+}
+
+enum ClaimStatus {
+  DRAFT
+  SCRUBBED
+  SUBMITTED
+  ACCEPTED
+  PAID
+  DENIED
+  APPEALED
+}
+
+enum ConsentType {
+  HIPAA_NPP
+  DATA_PROCESSING
+  MARKETING
+  TELEHEALTH
+}
+
+enum CodeSystem {
+  ICD10
+  CPT
+  HCPCS
+}
+
+// -----------------------------------------------------------------------------
+// Identity, audit & compliance (SHARED / AUTH)
+// -----------------------------------------------------------------------------
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  firstName    String?
+  lastName     String?
+  role         UserRole   @default(FRONT_DESK)
+  isActive     Boolean    @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  auditLogs    AuditLog[]
+  encounters   Encounter[] @relation("EncounterProvider")
+
+  @@index([role])
+  @@map("users")
+}
+
+/// HIPAA access trail — one row per PHI-touching request (Task T06).
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  entityType String
+  entityId   String?
+  route      String?
+  method     String?
+  ipAddress  String?
+  userAgent  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// GDPR / DPDPA consent ledger (Task T17 relies on this for lawful retention).
+model ConsentLog {
+  id          String      @id @default(cuid())
+  customerId  String
+  consentType ConsentType
+  granted     Boolean
+  version     String?
+  source      String?
+  createdAt   DateTime    @default(now())
+
+  customer    Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([consentType])
+  @@map("consent_logs")
+}
+
+// -----------------------------------------------------------------------------
+// Scheduling core (SCHEDULING)
+// -----------------------------------------------------------------------------
+
+/// A bookable resource: provider, room, chair, or equipment.
+model Resource {
+  id            String        @id @default(cuid())
+  name          String
+  type          ResourceType  @default(PROVIDER)
+  // Weekly availability windows / working hours as structured JSON.
+  // e.g. [{ "day": 1, "start": "09:00", "end": "17:00" }]
+  schedule      Json?
+  bufferMinutes Int           @default(0)
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  appointments  Appointment[]
+
+  @@index([type])
+  @@map("resources")
+}
+
+/// Domain-neutral person record: patient (HEALTHCARE) or client (SALON/GENERIC).
+/// ssn / phone / address are encrypted at rest by the extended Prisma client.
+model Customer {
+  id           String        @id @default(cuid())
+  firstName    String
+  lastName     String
+  email        String?       @unique
+  dateOfBirth  DateTime?
+  // --- Encrypted-at-rest PII (ciphertext strings) ---
+  ssn          String?
+  phone        String?
+  address      String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  // Soft-anonymization marker set by the erasure pipeline (Task T17).
+  anonymizedAt DateTime?
+
+  appointments Appointment[]
+  encounters   Encounter[]
+  claims       Claim[]
+  consentLogs  ConsentLog[]
+
+  @@index([lastName, firstName])
+  @@map("customers")
+}
+
+/// A bookable/billable offering: visit type, procedure, or salon service.
+model ServiceItem {
+  id            String        @id @default(cuid())
+  name          String
+  description   String?
+  // Default procedure code (CPT/HCPCS) applied when this item is healthcare-billable.
+  defaultCode   String?
+  durationMin   Int           @default(30)
+  priceCents    Int           @default(0)
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  appointments  Appointment[]
+
+  @@map("service_items")
+}
+
+model Appointment {
+  id            String            @id @default(cuid())
+  customerId    String
+  resourceId    String
+  serviceItemId String?
+  startTime     DateTime
+  endTime       DateTime
+  status        AppointmentStatus @default(SCHEDULED)
+  notes         String?
+  // Non-clinical adapter metadata (e.g. Stripe deposit intent for SALON mode).
+  externalRef   String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  customer      Customer          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  resource      Resource          @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  serviceItem   ServiceItem?      @relation(fields: [serviceItemId], references: [id], onDelete: SetNull)
+  encounter     Encounter?
+
+  @@index([resourceId, startTime])
+  @@index([customerId])
+  @@index([status])
+  @@map("appointments")
+}
+
+// -----------------------------------------------------------------------------
+// Clinical core (CLINICAL) — HEALTHCARE mode only
+// -----------------------------------------------------------------------------
+
+model Encounter {
+  id            String               @id @default(cuid())
+  customerId    String
+  providerId    String?
+  appointmentId String?              @unique
+  status        EncounterStatus      @default(OPEN)
+  // Structured SOAP note produced by the ambient scribe (Task T11).
+  // { subjective, objective, assessment, plan }
+  soapNote      Json?
+  signedAt      DateTime?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  customer      Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  provider      User?                @relation("EncounterProvider", fields: [providerId], references: [id], onDelete: SetNull)
+  appointment   Appointment?         @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+  diagnoses     EncounterDiagnosis[]
+  procedures    EncounterProcedure[]
+  claims        Claim[]
+
+  @@index([customerId])
+  @@index([status])
+  @@map("encounters")
+}
+
+/// ICD-10 diagnoses attached to an encounter (Task T13 sets aiSuggested=true).
+model EncounterDiagnosis {
+  id           String     @id @default(cuid())
+  encounterId  String
+  code         String
+  codeSystem   CodeSystem @default(ICD10)
+  description  String?
+  rank         Int        @default(1)
+  aiSuggested  Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+
+  encounter    Encounter  @relation(fields: [encounterId], references: [id], onDelete: Cascade)
+
+  @@unique([encounterId, code])
+  @@index([code])
+  @@map("encounter_diagnoses")
+}
+
+/// CPT/HCPCS procedures attached to an encounter (Task T13 sets aiSuggested=true).
+model EncounterProcedure {
+  id           String     @id @default(cuid())
+  encounterId  String
+  code         String
+  codeSystem   CodeSystem @default(CPT)
+  description  String?
+  modifiers    String[]   @default([])
+  units        Int        @default(1)
+  chargeCents  Int        @default(0)
+  aiSuggested  Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+
+  encounter    Encounter  @relation(fields: [encounterId], references: [id], onDelete: Cascade)
+
+  @@index([encounterId])
+  @@index([code])
+  @@map("encounter_procedures")
+}
+
+// -----------------------------------------------------------------------------
+// Revenue cycle (RCM)
+// -----------------------------------------------------------------------------
+
+model Claim {
+  id             String      @id @default(cuid())
+  customerId     String
+  encounterId    String?
+  status         ClaimStatus @default(DRAFT)
+  // Pre-submission scrubber output (Task T14): 0.0 (clean) .. 1.0 (high risk).
+  scrubRiskScore Float?
+  scrubFlags     Json?
+  totalCents     Int         @default(0)
+  paidCents      Int         @default(0)
+  // Payer control number / claim reference used to reconcile EDI 835 remits.
+  payerClaimId   String?
+  // Raw generated ANSI X12 837P transaction (Task T15).
+  edi837Raw      String?
+  // Claim Adjustment Reason Codes parsed from EDI 835 (Task T16).
+  carcCodes      String[]    @default([])
+  submittedAt    DateTime?
+  adjudicatedAt  DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  customer       Customer    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  encounter      Encounter?  @relation(fields: [encounterId], references: [id], onDelete: SetNull)
+
+  @@index([customerId])
+  @@index([status])
+  @@index([payerClaimId])
+  @@map("claims")
+}
+
+// -----------------------------------------------------------------------------
+// Clinical RAG (CLINICAL, Task T12) — pgvector embeddings
+// -----------------------------------------------------------------------------
+
+/// Evidence-based guideline chunks for cosine-similarity retrieval.
+/// `embedding` uses the pgvector `vector` type (1536-dim, OpenAI ada-002 sized).
+model ClinicalGuideline {
+  id        String                      @id @default(cuid())
+  title     String
+  source    String?
+  content   String
+  embedding Unsupported("vector(1536)")?
+  createdAt DateTime                    @default(now())
+
+  @@map("clinical_guidelines")
+}
