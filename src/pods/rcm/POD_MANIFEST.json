@@ -1,0 +1,31 @@
+{
+  "$schema": "https://ehr-rcm.dev/schemas/pod-manifest.v1.json",
+  "name": "rcm",
+  "domain": "RCM",
+  "version": "0.1.0",
+  "description": "Revenue cycle: computer-assisted coding, claim scrubbing, and X12 EDI 837/835 processing.",
+  "tasks": ["T13", "T14", "T15", "T16"],
+  "exports": {
+    "cac": {
+      "codeEncounter": "src/pods/rcm/backend/cac-coder.service.ts#codeEncounter",
+      "codeSoapNote": "src/pods/rcm/backend/cac-coder.service.ts#codeSoapNote"
+    },
+    "scrubber": "src/pods/rcm/backend/claim-scrubber.service.ts#scrubClaim",
+    "edi837": "src/pods/rcm/backend/edi837-generator.service.ts#generateEdi837P",
+    "edi835": {
+      "parseEra": "src/pods/rcm/backend/edi835-parser.service.ts#parseEra",
+      "postEra": "src/pods/rcm/backend/edi835-parser.service.ts#postEra"
+    }
+  },
+  "externalServices": [
+    { "provider": "Anthropic", "usage": ["messages (claude-3-5-sonnet) for CAC coding"] }
+  ],
+  "standards": [
+    "ICD-10-CM / CPT / HCPCS coding",
+    "NCCI (CCI) mutually-exclusive edits",
+    "ANSI X12 005010X222A1 (837P)",
+    "ANSI X12 835 (ERA) with CARC codes"
+  ],
+  "dependsOn": ["shared/db/prisma (T04)", "clinical scribe (T11)"],
+  "models": ["EncounterDiagnosis", "EncounterProcedure", "Claim"]
+}
