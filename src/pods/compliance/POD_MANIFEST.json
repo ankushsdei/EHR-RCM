@@ -1,0 +1,20 @@
+{
+  "$schema": "https://ehr-rcm.dev/schemas/pod-manifest.v1.json",
+  "name": "compliance",
+  "domain": "COMPLIANCE",
+  "version": "0.1.0",
+  "description": "Data-subject rights: GDPR / DPDPA right-to-be-forgotten erasure with clinical retention.",
+  "tasks": ["T17"],
+  "exports": {
+    "anonymizeCustomer": "src/pods/compliance/backend/anonymizer.service.ts#anonymizeCustomer",
+    "pseudonym": "src/pods/compliance/backend/anonymizer.service.ts#pseudonym"
+  },
+  "compliance": {
+    "regulations": ["GDPR", "DPDPA"],
+    "mechanism": "Salted SHA-256 pseudonymization of identifiers; sensitive fields nulled.",
+    "retention": "Encounters and Claims are never deleted; only Customer PII is erased.",
+    "auditability": "Every erasure writes an immutable AuditLog entry (action=ERASURE)."
+  },
+  "dependsOn": ["shared/db/prisma (T04)"],
+  "models": ["Customer", "AuditLog"]
+}
