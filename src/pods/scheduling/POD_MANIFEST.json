@@ -1,0 +1,41 @@
+{
+  "$schema": "https://ehr-rcm.dev/schemas/pod-manifest.v1.json",
+  "name": "scheduling",
+  "domain": "SCHEDULING",
+  "version": "0.1.0",
+  "description": "Resource scheduling: slot calculation, booking, status transitions, and domain adapters.",
+  "tasks": ["T07", "T08", "T09", "T10"],
+  "routes": [
+    { "method": "GET", "path": "/api/v1/scheduling/slots", "description": "List available slots for a resource/date." },
+    { "method": "POST", "path": "/api/v1/scheduling/appointments", "description": "Create a booking (rejects double-booking)." },
+    { "method": "PATCH", "path": "/api/v1/scheduling/appointments/:id/status", "description": "Transition appointment state; emits status-change event." }
+  ],
+  "exports": {
+    "router": "src/pods/scheduling/backend/scheduling.router.ts#createSchedulingRouter",
+    "service": "src/pods/scheduling/backend/slot-calculator.service.ts#calculateAvailableSlots",
+    "eventBus": "src/pods/scheduling/backend/scheduling.events.ts#schedulingEventBus",
+    "adapters": {
+      "health": "src/pods/scheduling/backend/adapters/health.adapter.ts#registerHealthAdapter",
+      "generic": "src/pods/scheduling/backend/adapters/generic.adapter.ts#registerGenericAdapter"
+    }
+  },
+  "events": [
+    { "name": "AppointmentStatusChanged", "emittedBy": "scheduling.router", "consumedBy": ["health.adapter", "generic.adapter"] }
+  ],
+  "domainBehavior": {
+    "HEALTHCARE": "health.adapter creates an Encounter + mock EDI 270 eligibility on CHECKED_IN.",
+    "SALON": "generic.adapter settles deposits / fires webhooks on CHECKED_IN; no clinical tables touched.",
+    "GENERIC": "generic.adapter handles webhooks only."
+  },
+  "statusMachine": {
+    "SCHEDULED": ["CONFIRMED", "CHECKED_IN", "CANCELLED", "NO_SHOW"],
+    "CONFIRMED": ["CHECKED_IN", "CANCELLED", "NO_SHOW"],
+    "CHECKED_IN": ["IN_PROGRESS", "COMPLETED", "CANCELLED"],
+    "IN_PROGRESS": ["COMPLETED", "CANCELLED"],
+    "COMPLETED": [],
+    "CANCELLED": [],
+    "NO_SHOW": []
+  },
+  "dependsOn": ["shared/db/prisma (T04)", "config/pod (T03)"],
+  "models": ["Resource", "Appointment", "Encounter"]
+}
