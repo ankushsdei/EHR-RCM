@@ -1,0 +1,29 @@
+{
+  "$schema": "https://ehr-rcm.dev/schemas/pod-manifest.v1.json",
+  "name": "clinical",
+  "domain": "CLINICAL",
+  "version": "0.1.0",
+  "description": "Ambient AI scribe (Whisper → Claude SOAP notes) and pgvector guideline RAG for clinical decision support.",
+  "tasks": ["T11", "T12"],
+  "exports": {
+    "scribe": {
+      "generateSoapNote": "src/pods/clinical/backend/scribe-ai.service.ts#generateSoapNote",
+      "transcribeAudio": "src/pods/clinical/backend/scribe-ai.service.ts#transcribeAudio",
+      "extractSoapFromTranscript": "src/pods/clinical/backend/scribe-ai.service.ts#extractSoapFromTranscript"
+    },
+    "rag": {
+      "searchGuidelines": "src/pods/clinical/backend/rag-guidelines.service.ts#searchGuidelines",
+      "generateGuidance": "src/pods/clinical/backend/rag-guidelines.service.ts#generateGuidance"
+    }
+  },
+  "externalServices": [
+    { "provider": "OpenAI", "usage": ["audio.transcriptions (whisper-1)", "embeddings (text-embedding-3-small)"] },
+    { "provider": "Anthropic", "usage": ["messages (claude-3-5-sonnet)"] }
+  ],
+  "compliance": {
+    "phiHandling": "Audio + transcripts contain PHI; SOAP notes persist on Encounter. Provider calls must run over BAA-covered endpoints in production.",
+    "grounding": "RAG answers are constrained to retrieved guideline excerpts with inline citations."
+  },
+  "dependsOn": ["shared/db/prisma (T04)", "config/env (T02)"],
+  "models": ["Encounter", "ClinicalGuideline"]
+}
