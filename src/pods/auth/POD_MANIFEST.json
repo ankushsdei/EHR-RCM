@@ -1,0 +1,33 @@
+{
+  "$schema": "https://ehr-rcm.dev/schemas/pod-manifest.v1.json",
+  "name": "auth",
+  "domain": "AUTH",
+  "version": "0.1.0",
+  "description": "Authentication, JWT session management, RBAC, and HIPAA access auditing.",
+  "tasks": ["T05", "T06"],
+  "routes": [
+    { "method": "POST", "path": "/api/v1/auth/register", "auth": "public", "description": "Create a user with a bcrypt-hashed password." },
+    { "method": "POST", "path": "/api/v1/auth/login", "auth": "public", "description": "Verify credentials; issue an HttpOnly JWT cookie." },
+    { "method": "POST", "path": "/api/v1/auth/logout", "auth": "public", "description": "Clear the auth cookie." }
+  ],
+  "exports": {
+    "router": "src/pods/auth/backend/auth.router.ts#createAuthRouter",
+    "middleware": {
+      "authenticate": "src/pods/auth/backend/auth.middleware.ts#authenticate",
+      "checkRole": "src/pods/auth/backend/auth.middleware.ts#checkRole",
+      "hipaaAuditLogger": "src/pods/auth/backend/auth.middleware.ts#hipaaAuditLogger"
+    }
+  },
+  "roles": ["ADMIN", "PROVIDER", "CLINICIAN", "FRONT_DESK", "BILLER", "PATIENT"],
+  "security": {
+    "session": "JWT in HttpOnly, SameSite=strict cookie (Secure in production)",
+    "passwordHashing": "bcrypt (cost 12)",
+    "tokenTtlSeconds": 28800
+  },
+  "compliance": {
+    "hipaa": "Writes an AuditLog row for every PHI-route access via hipaaAuditLogger.",
+    "phiHandling": "No PHI in JWT payload (subject, email, role only)."
+  },
+  "dependsOn": ["shared/db/prisma (T04)", "config/env (T02)"],
+  "models": ["User", "AuditLog"]
+}
